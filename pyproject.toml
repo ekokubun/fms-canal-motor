@@ -1,0 +1,31 @@
+[project]
+name = "fms-canal-motor"
+version = "0.1.0"
+description = "Motor de canal endêmico (Gamma-Poisson bootstrap) + sink Postgres + pipeline de faixas etárias/boletim — extraído dos 3 repos FMS (canal-endemico/canal-aps/canal-epidemico), que eram cópias byte-idênticas."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "psycopg2-binary>=2.9",
+]
+
+[project.optional-dependencies]
+boletim = [
+    "matplotlib>=3.8",
+    "python-docx>=1.1",
+]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+fms-carga-postgres = "fms_canal_motor.carga_postgres:main"
+fms-canal-pipeline = "fms_canal_motor.pipeline:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
