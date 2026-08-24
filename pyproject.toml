@@ -1,6 +1,6 @@
 [project]
 name = "fms-canal-motor"
-version = "0.1.0"
+version = "0.2.1"
 description = "Motor de canal endêmico (Gamma-Poisson bootstrap) + sink Postgres + pipeline de faixas etárias/boletim — extraído dos 3 repos FMS (canal-endemico/canal-aps/canal-epidemico), que eram cópias byte-idênticas."
 requires-python = ">=3.11"
 dependencies = [

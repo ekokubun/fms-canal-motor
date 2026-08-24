@@ -266,7 +266,16 @@ def gravar_postgres(schema, fonte, metas, prioridades, obs, canal, clf, meta_exe
                 # 1. Upsert dim_agravo → mapa nome→id
                 dim_vals = [(nome, t, cid, cap, prioridades.get(nome))
                             for nome, (t, cid, cap) in metas.items()]
-                execute_values(cur, """
+                # fetch=True NAO e opcional aqui. execute_values quebra o INSERT
+                # em paginas de page_size (100 por padrao) e executa uma por vez;
+                # sem fetch, cur.fetchall() devolve apenas o RETURNING da ULTIMA
+                # pagina. Enquanto o municipio teve <=100 agravos isso funcionou
+                # por sorte -- cabia em uma pagina so. Ao chegar a 103 (canais de
+                # Pneumonia/DPOC/Asma, commit a4dbe5a) nome2id passou a ter 3
+                # chaves em vez de 103, e a carga morria em
+                # "KeyError: 'Todos os atendimentos'" -- que nao era agravo
+                # ausente, so o primeiro nome que obs procurava.
+                rows = execute_values(cur, """
                     INSERT INTO dim_agravo (nome, tipo, cid_codigo, capitulo, prioridade)
                     VALUES %s
                     ON CONFLICT (nome) DO UPDATE SET
@@ -275,8 +284,18 @@ def gravar_postgres(schema, fonte, metas, prioridades, obs, canal, clf, meta_exe
                         capitulo   = EXCLUDED.capitulo,
                         prioridade = COALESCE(EXCLUDED.prioridade, dim_agravo.prioridade)
                     RETURNING agravo_id, nome
-                """, dim_vals)
-                nome2id = {nome: aid for aid, nome in cur.fetchall()}
+                """, dim_vals, fetch=True)
+                nome2id = {nome: aid for aid, nome in rows}
+
+                # Guarda: se algum dia faltar id de novo, dizer QUAL e QUANTOS em
+                # vez de estourar um KeyError solto no meio de uma list comp.
+                faltando = {n for (n, *_rest) in obs} - set(nome2id)
+                if faltando:
+                    raise RuntimeError(
+                        f"dim_agravo nao devolveu agravo_id para {len(faltando)} "
+                        f"agravo(s) de {len(metas)} em metas; exemplos: "
+                        f"{sorted(faltando)[:5]}"
+                    )
 
                 # 2. Limpar dados desta fonte (swap atômico)
                 for tbl in ('classificacao_se', 'canal_endemico', 'fato_observacao_se'):
