@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Hook anti-PII/segredo — segunda camada de proteção, além do .gitignore.
+# Bloqueia o commit se algo com cara de dado de paciente ou credencial estiver staged,
+# mesmo que alguém tenha forçado com `git add -f` passando por cima do .gitignore.
+#
+# Instalação (uma vez por clone): git config core.hooksPath .githooks
+
+set -euo pipefail
+BLOQUEADO=0
+
+arquivos_staged() { git diff --cached --name-only --diff-filter=ACM; }
+
+echo "🔍 Checando PII/segredo nos arquivos staged..."
+
+for f in $(arquivos_staged); do
+  [ -f "$f" ] || continue
+
+  # --- Extensões de dado que NUNCA deveriam ser commitadas, salvo exceção explícita
+  #     já registrada no .gitignore com "!arquivo" (essas exceções não chegam aqui
+  #     porque .gitignore já as libera antes de "git add" funcionar sem -f).
+  case "$f" in
+    *.csv|*.tsv|*.parquet|*.xlsx)
+      echo "❌ BLOQUEADO: $f — extensão de dado tabular. Se for agregado/público de"
+      echo "   propósito, adicione exceção explícita no .gitignore (!$f), não force o add."
+      BLOQUEADO=1
+      ;;
+  esac
+
+  case "$(basename "$f")" in
+    .env|*.env|*secret*|*.key|*.pem)
+      echo "❌ BLOQUEADO: $f — nome de arquivo de segredo/credencial."
+      BLOQUEADO=1
+      ;;
+  esac
+
+  # --- Padrões de segredo dentro do conteúdo (não só no nome do arquivo)
+  if grep -qE '(api[_-]?key|password|senha|secret)\s*=\s*["'"'"'][^"'"'"']{6,}["'"'"']' "$f" 2>/dev/null; then
+    if ! grep -qE '(fixo no frontend|não é segredo|CLIENT_SECRET.*público)' "$f" 2>/dev/null; then
+      echo "❌ BLOQUEADO: $f — padrão de credencial em texto no conteúdo."
+      echo "   Se for um valor público conhecido (ex.: client_id de frontend), documente"
+      echo "   isso com um comentário no código pra este hook reconhecer a exceção."
+      BLOQUEADO=1
+    fi
+  fi
+
+  # --- CPF (11 dígitos com máscara xxx.xxx.xxx-xx) — sinal forte de PII individual
+  if grep -qE '[0-9]{3}\.[0-9]{3}\.[0-9]{3}-[0-9]{2}' "$f" 2>/dev/null; then
+    echo "❌ BLOQUEADO: $f — padrão de CPF mascarado encontrado."
+    BLOQUEADO=1
+  fi
+done
+
+if [ "$BLOQUEADO" = "1" ]; then
+  echo
+  echo "🛑 Commit bloqueado. Se algum bloqueio acima for falso positivo, ajuste o arquivo"
+  echo "   ou peça revisão — não use 'git commit --no-verify' pra pular isso sem checar"
+  echo "   com um arquiteto primeiro."
+  exit 1
+fi
+
+echo "✅ Nenhum PII/segredo óbvio encontrado."
+exit 0
