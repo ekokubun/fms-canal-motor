@@ -74,9 +74,12 @@ def test_intq_trunca_float():
 # ── rows_from_channel_data ───────────────────────────────────────────────────
 
 def test_rows_from_channel_data_shapes_correctly():
+    # Agravo SINDRÔMICO de propósito: desde 2026-08-29 o agregado "Todos os
+    # atendimentos" e os administrativos (Z*, E10-E14, E78, cap. XXI) não
+    # recebem mais zona — viraram série sem leitura epidemiológica.
     channel_data = {
         "channels": {
-            "Todos os atendimentos": {
+            "X - Aparelho respiratório": {
                 "se_list": [1],
                 "raw": [{"se": 1, "c2023": 10, "c2024": 12}],
                 "channels": {"2023": [[1, 2, 3, 4, 5]]},
@@ -89,13 +92,14 @@ def test_rows_from_channel_data_shapes_correctly():
     obs, canal, clf, metas = [], [], [], {}
     CP.rows_from_channel_data(channel_data, obs, canal, clf, metas)
 
-    assert metas == {"Todos os atendimentos": ("todos", None, None)}
+    nome = "X - Aparelho respiratório"
+    assert metas == {nome: ("capitulo", None, nome)}
     assert sorted(obs) == sorted([
-        ("Todos os atendimentos", "Todas", 2023, 1, 10),
-        ("Todos os atendimentos", "Todas", 2024, 1, 12),
+        (nome, "Todas", 2023, 1, 10),
+        (nome, "Todas", 2024, 1, 12),
     ])
-    assert canal == [("Todos os atendimentos", "Todas", 2023, 1, 1, 2, 3, 4, 5, 1.1, 2.2)]
-    assert clf == [("Todos os atendimentos", "Todas", 2023, 1, "sucesso", 0.5)]
+    assert canal == [(nome, "Todas", 2023, 1, 1, 2, 3, 4, 5, 1.1, 2.2)]
+    assert clf == [(nome, "Todas", 2023, 1, "sucesso", 0.5)]
 
 
 def test_rows_from_channel_data_sem_params_usa_none():
@@ -122,7 +126,7 @@ def test_rows_from_channel_data_sem_params_usa_none():
 
 def test_rows_from_age_inmem():
     age_results = {
-        "Todos os atendimentos": {
+        "X - Aparelho respiratório": {
             "18-39 anos": {
                 "raw": {"2023": {"1": 5}},
                 "channels": {"1": {"p10": 1, "p25": 2, "p50": 3, "p75": 4, "p90": 5}},
@@ -132,9 +136,10 @@ def test_rows_from_age_inmem():
     }
     obs, canal, clf, metas = [], [], [], {}
     CP.rows_from_age_inmem(age_results, obs, canal, clf, metas)
-    assert obs == [("Todos os atendimentos", "18-39 anos", 2023, 1, 5)]
-    assert canal == [("Todos os atendimentos", "18-39 anos", 2023, 1, 1, 2, 3, 4, 5, None, None)]
-    assert clf == [("Todos os atendimentos", "18-39 anos", 2023, 1, "alerta", None)]
+    nome = "X - Aparelho respiratório"
+    assert obs == [(nome, "18-39 anos", 2023, 1, 5)]
+    assert canal == [(nome, "18-39 anos", 2023, 1, 1, 2, 3, 4, 5, None, None)]
+    assert clf == [(nome, "18-39 anos", 2023, 1, "alerta", None)]
 
 
 def test_rows_from_age_compact():
@@ -217,6 +222,14 @@ def test_gravar_postgres_filtra_zona_invalida_e_seta_schema():
 
     def fake_execute_values(cur_, sql, values, **kw):
         ev_calls.append((sql, values))
+        # Desde 07bf3b6 a carga usa execute_values(..., fetch=True) para ler o
+        # RETURNING do dim_agravo (o fetchall separado perdia linhas acima de 100
+        # agravos). O mock precisa devolver as linhas quando fetch=True, senão
+        # `nome2id` recebe None e o teste quebra por TypeError — foi o que deixou
+        # esta suíte vermelha desde aquele commit.
+        if kw.get("fetch"):
+            return [(1, "Todos os atendimentos")]
+        return None
 
     metas = {"Todos os atendimentos": ("todos", None, None)}
     obs = [("Todos os atendimentos", "Todas", 2026, 1, 10)]
@@ -256,3 +269,86 @@ def test_gravar_postgres_fecha_conexao_mesmo_com_erro():
             pass
 
     conn.close.assert_called_once()
+
+
+# ── Agravos sem leitura epidemiológica e semanas não publicadas ──────────────
+# Contrato de 2026-08-29: administrativos (Z*, E10-E14, E78, cap. XXI) e o
+# agregado "Todos os atendimentos" continuam sendo publicados como SÉRIE (fato +
+# faixa de referência), mas sem classificação de zona — alarmavam de 21 a 33
+# semanas em 33 porque o que sobe neles é prática de registro, não risco de
+# surto. E semana que ainda não aconteceu não é "sucesso": é ausência de dado.
+
+def _canal_de(nome, se_list=(1, 2), ano="2026"):
+    n = len(se_list)
+    return {"channels": {nome: {
+        "se_list": list(se_list),
+        "raw": [{"se": s, f"c{ano}": 10} for s in se_list],
+        "channels": {ano: [[1, 2, 3, 4, 5]] * n},
+        "params": {ano: [{"shape": 1.1, "rate": 2.2}] * n},
+        "classifications": {ano: ["sucesso"] * n},
+        "exceedance": {ano: [0.5] * n},
+    }}}
+
+
+def test_agregado_nao_recebe_zona_mas_mantem_serie():
+    obs, canal, clf, metas = [], [], [], {}
+    CP.rows_from_channel_data(_canal_de("Todos os atendimentos"), obs, canal, clf, metas)
+    assert clf == []                      # sem leitura epidemiológica
+    assert len(obs) == 2 and len(canal) == 2   # série e faixa seguem publicadas
+
+
+def test_administrativos_e_cronicos_nao_recebem_zona():
+    for nome in ("Z760 - EMISSAO DE PRESCRICAO DE REPETICAO",
+                 "Z00 - EXAME GERAL",
+                 "E149 - DIABETES MELLITUS NAO ESPECIFICADO",
+                 "E11 - DIABETES MELLITUS NAO-INSULINO-DEPENDENTE",
+                 "E78 - OUTRAS LIPIDEMIAS",
+                 "XXI - Fatores que influenciam o estado de saúde"):
+        obs, canal, clf, metas = [], [], [], {}
+        CP.rows_from_channel_data(_canal_de(nome), obs, canal, clf, metas)
+        assert clf == [], f"{nome} nao deveria receber zona"
+
+
+def test_sindromicos_continuam_recebendo_zona():
+    """Nota: TODO o capítulo Z é excluído (Z000, Z10, Z34, Z532, Z760 são códigos
+    de contato/administrativos), e em E só a diabetes (E10-E14) e as dislipidemias
+    (E78) — E86 (depleção de volume) segue sendo canal."""
+    for nome in ("X - Aparelho respiratório", "SINAN: Dengue",
+                 "A09 - DIARREIA E GASTROENTERITE", "Dor Osteomuscular",
+                 "M545 - DOR LOMBAR BAIXA", "E86 - DEPLECAO DE VOLUME"):
+        obs, canal, clf, metas = [], [], [], {}
+        CP.rows_from_channel_data(_canal_de(nome), obs, canal, clf, metas)
+        assert len(clf) == 2, f"{nome} deveria receber zona"
+
+
+def test_semana_futura_nao_e_publicada():
+    """Setembro a dezembro do ano corrente chegavam com casos=0, que cai abaixo
+    do p25 e virava 'sucesso' — 1.713 linhas da UPA e 1.675 da APS em 2026."""
+    cd = _canal_de("X - Aparelho respiratório", se_list=(1, 2, 3))
+    cd["metadata"] = {"ano_monitorado": 2026, "se_max_observada": 2}
+    obs, canal, clf, metas = [], [], [], {}
+    CP.rows_from_channel_data(cd, obs, canal, clf, metas)
+    assert [c[3] for c in clf] == [1, 2]
+    assert [o[3] for o in obs] == [1, 2]
+    assert len(canal) == 3        # a faixa de referência da SE futura pode ficar
+
+
+def test_sem_metadata_publica_tudo():
+    """JSON antigo, sem se_max_observada: comportamento de antes, sem surpresa."""
+    cd = _canal_de("X - Aparelho respiratório", se_list=(1, 2, 3))
+    obs, canal, clf, metas = [], [], [], {}
+    CP.rows_from_channel_data(cd, obs, canal, clf, metas)
+    assert len(clf) == 3
+
+
+def test_faixa_etaria_tambem_filtra_o_agregado():
+    """Sem isto o agregado voltava pela porta das faixas etárias, com 6 faixas x
+    52 SE = 312 linhas de zona."""
+    age = {"Todos os atendimentos": {"18-39 anos": {
+        "raw": {"2026": {"1": 5}},
+        "channels": {"1": {"p10": 1, "p25": 2, "p50": 3, "p75": 4, "p90": 5}},
+        "classifications": {"2026": {"1": "alerta"}}}}}
+    obs, canal, clf, metas = [], [], [], {}
+    CP.rows_from_age_inmem(age, obs, canal, clf, metas)
+    assert clf == []
+    assert len(obs) == 1 and len(canal) == 1
