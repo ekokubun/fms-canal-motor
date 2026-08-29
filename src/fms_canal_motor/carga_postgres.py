@@ -150,6 +150,9 @@ def rows_from_age_inmem(age_results, obs, canal, clf, metas):
     """Faixas etárias — formato em memória do pipeline.step3_age_channels.
     results[agravo][faixa] = {channels:{se:{p10..}}, raw:{ano:{se:n}}, classifications:{ano:{se:zona}}}
     """
+    # O mesmo filtro do agregado vale aqui: sem ele o agravo "Todos os atendimentos"
+    # voltava pela porta das faixas etárias, com 6 faixas x 52 SE = 312 linhas de zona.
+    from fms_canal_motor.compute_channels import sem_zona_epidemica
     for agravo, faixas in age_results.items():
         metas.setdefault(agravo, classify_agravo(agravo))
         for faixa, d in faixas.items():
@@ -170,10 +173,11 @@ def rows_from_age_inmem(age_results, obs, canal, clf, metas):
                                   c.get('p10'), c.get('p25'), c.get('p50'),
                                   c.get('p75'), c.get('p90'), None, None))
 
-            for ano_s, ses in clfs.items():
-                ano = int(ano_s)
-                for se_s, z in ses.items():
-                    clf.append((agravo, faixa, ano, int(se_s), z, None))
+            if not sem_zona_epidemica(agravo):
+                for ano_s, ses in clfs.items():
+                    ano = int(ano_s)
+                    for se_s, z in ses.items():
+                        clf.append((agravo, faixa, ano, int(se_s), z, None))
 
 
 def rows_from_age_compact(age_compact, obs, canal, metas):

@@ -70,7 +70,9 @@ USAR_PROPORCAO = _os.getenv('CANAL_PROPORCAO', '1') != '0'   # canal de agravo c
 # "Todos os atendimentos" entra aqui por decisão de 2026-08-28: é indicador de
 # DEMANDA, não de epidemia.
 import re as _re
-_SEM_ZONA_RE = _re.compile(r'^(Z\d|E1[014]\b|E78|Z34|Z00|Z10|Z76)')
+# E1[0-4] = diabetes (E10 a E14, com ou sem subcódigo — E149 escapava de um \b),
+# E78 = dislipidemias, Z* = todo o capítulo administrativo.
+_SEM_ZONA_RE = _re.compile(r'^(Z\d|E1[0-4]|E78)')
 
 def sem_zona_epidemica(nome: str) -> bool:
     return (nome == 'Todos os atendimentos'
