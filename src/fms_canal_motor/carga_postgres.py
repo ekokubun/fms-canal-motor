@@ -89,6 +89,25 @@ def _intq(q, i):
 
 def rows_from_channel_data(channel_data, obs, canal, clf, metas):
     """Canais principais (agregado, faixa='Todas'). channel_data = run_pipeline output."""
+    # Semana que ainda não aconteceu não é 'sucesso': é ausência de dado. O motor
+    # classifica as 52 SE do ano monitorado e as futuras chegam com casos=0, que
+    # cai abaixo do p25. Corta em se_max_observada (metadata do pipeline); sem o
+    # campo (JSON antigo) o comportamento fica como era.
+    _meta = channel_data.get('metadata', {})
+    _ano_mon = _meta.get('ano_monitorado')
+    _se_max = _meta.get('se_max_observada')
+
+    def _futura(ano, se):
+        return (_ano_mon is not None and _se_max is not None
+                and int(ano) == int(_ano_mon) and int(se) > int(_se_max))
+
+    # Agravos sem leitura epidemiológica (administrativos, crônicos e o agregado
+    # de demanda): a SÉRIE e a FAIXA continuam sendo gravadas — servem para gestão
+    # e para vigiar a própria codificação —, mas sem classificação de zona. Eram
+    # ~300 dos 1.080 alarmes da APS, disparando de 21 a 33 semanas em 33 porque o
+    # que sobe neles é prática de registro, não risco de surto.
+    from fms_canal_motor.compute_channels import sem_zona_epidemica
+
     for nome, ch in channel_data.get('channels', {}).items():
         metas.setdefault(nome, classify_agravo(nome))
         se_list = ch.get('se_list') or list(range(1, 53))
@@ -98,6 +117,8 @@ def rows_from_channel_data(channel_data, obs, canal, clf, metas):
             se = int(entry.get('se'))
             for k, v in entry.items():
                 if k.startswith('c') and k[1:].isdigit():
+                    if _futura(int(k[1:]), se):
+                        continue
                     obs.append((nome, 'Todas', int(k[1:]), se, int(v)))
 
         # Limiares por ano: channels[ano] = [[p10..p90] × 52]; params idem
@@ -120,6 +141,8 @@ def rows_from_channel_data(channel_data, obs, canal, clf, metas):
             for i, z in enumerate(zonas):
                 se = int(se_list[i]) if i < len(se_list) else i + 1
                 e = eano[i] if i < len(eano) else None
+                if _futura(ano, se) or sem_zona_epidemica(nome):
+                    continue
                 clf.append((nome, 'Todas', ano, se, z, e))
 
 

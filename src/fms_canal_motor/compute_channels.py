@@ -35,6 +35,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import nbinom as _scipy_nbinom
+from scipy.stats import betabinom as _scipy_betabinom
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -55,6 +56,57 @@ QUANTILES  = [0.10, 0.25, 0.50, 0.75, 0.90]
 ZONE_NAMES = ['sucesso', 'seguranca', 'alerta', 'epidemico', 'emergencia']
 RNG_SEED   = 2026
 MAX_SE     = 52          # SE 53 excluída por padrão (poucos dados)
+ATEND_COL  = 'atend_id'  # nível-atendimento: contar atendimentos, não linhas de CID
+JANELA_SE  = 2           # meia-janela de SE vizinhas usada na estimação (0 = SE isolada)
+import os as _os
+USAR_PROPORCAO = _os.getenv('CANAL_PROPORCAO', '1') != '0'   # canal de agravo como fração
+
+# Agravos SEM leitura epidemiológica: a série é real, mas o que ela mede é
+# produção administrativa ou registro de doença crônica, não risco de surto.
+# Alarmavam de 21 a 33 semanas em 33 — cerca de 300 dos 1.080 alarmes da APS —
+# porque o que subiu neles foi a prática de codificação. Continuam sendo
+# calculados e publicados como SÉRIE (útil para gestão e para vigiar a própria
+# codificação), mas não recebem classificação de zona epidêmica.
+# "Todos os atendimentos" entra aqui por decisão de 2026-08-28: é indicador de
+# DEMANDA, não de epidemia.
+import re as _re
+_SEM_ZONA_RE = _re.compile(r'^(Z\d|E1[014]\b|E78|Z34|Z00|Z10|Z76)')
+
+def sem_zona_epidemica(nome: str) -> bool:
+    return (nome == 'Todos os atendimentos'
+            or nome.startswith('XXI - ')
+            or bool(_SEM_ZONA_RE.match(nome)))
+
+
+def _betabinom_channel_se(k_train, n_train, n_mon):
+    """Faixa preditiva para a PROPORÇÃO do agravo no total de atendimentos da SE.
+
+    Prior beta ajustada por momentos sobre as proporções dos anos-base (a
+    sobredispersão entre anos vira a concentração da beta); preditiva
+    beta-binomial com o denominador observado na semana-alvo.
+
+    É o que torna o canal imune, por construção, a qualquer deriva de VOLUME —
+    codificação, unidade que entra ou sai, captura etária, demanda real. Se o
+    total da semana sobe 30% sem mudar a doença, a contagem do agravo sobe 30%
+    junto e a fração não se mexe.
+    """
+    k = np.asarray(k_train, dtype=float)
+    n = np.asarray(n_train, dtype=float)
+    n_mon = int(round(float(n_mon)))
+    if n.sum() <= 0 or n_mon <= 0:
+        return [0.0] * 5, 0.0, 0.0
+    ph = k.sum() / n.sum()
+    if ph <= 0:
+        return [0.0] * 5, 0.0, 0.0
+    ph = min(ph, 1 - 1e-9)
+    pi = k / np.maximum(n, 1.0)
+    v_obs = float(pi.var(ddof=1)) if len(pi) > 1 else 0.0
+    v_bin = float(np.mean(ph * (1 - ph) / np.maximum(n, 1.0)))
+    extra = max(v_obs - v_bin, 1e-12)                 # sobredispersão entre anos
+    s_tot = float(np.clip(ph * (1 - ph) / extra - 1.0, 0.5, 1e6))
+    a, b = ph * s_tot, (1 - ph) * s_tot
+    qs = [float(_scipy_betabinom.ppf(q, n_mon, a, b)) for q in QUANTILES]
+    return qs, a, b
 FALLBACK_SHAPE = 0.1     # para SE com todos os anos = 0
 FALLBACK_RATE  = 1.0
 # Anos de implantação — excluídos permanentemente do cálculo dos canais
@@ -367,7 +419,8 @@ def compute_endemic_channel(
     base_hist_years=None,
     use_mle=True,
     monitor_year=None
-):
+,
+        denominadores=None):
     """
     Computa canal endêmico para um agravo.
 
@@ -447,16 +500,38 @@ def compute_endemic_channel(
         params_se = []
 
         for s in all_se:
-            cases_train = [matrix.get((y, s), 0) for y in train_years]
-            exp_train = [exposures.get(y, 1.0) for y in train_years]
+            # Janela de SE vizinhas: com 3 anos-base a SE isolada dá 3 observações, e
+            # com 3 pontos a dispersão não é identificável — a faixa sai absurdamente
+            # estreita. Na APS de 2026 o p90 ficava 9% acima do p50: qualquer semana
+            # 9% acima da mediana virava 'emergência'. Com ±2 SE são 15 observações e
+            # a faixa vai para +23%, que é a variabilidade real. É a mesma ideia da
+            # janela de referência do Farrington/Noufaily (±3 semanas).
+            # Medido: alarmes de 'Todos' na APS caem de 5 para 0 em 2026 e de 9 para 2
+            # em 2025, e a detecção da epidemia de dengue de 2025 na UPA fica em 15
+            # semanas — inalterada. JANELA_SE = 0 restaura o comportamento anterior.
+            vizinhas = [((s - 1 + d) % MAX_SE) + 1
+                        for d in range(-JANELA_SE, JANELA_SE + 1)] if JANELA_SE else [s]
+            cases_train, exp_train = [], []
+            for v in vizinhas:
+                for y in train_years:
+                    cases_train.append(matrix.get((y, v), 0))
+                    exp_train.append(exposures.get(y, 1.0))
 
             # Exposição do ano monitorado
             e_mon = exposures.get(mon_year, 1.0)
 
-            # Motor único (decisão 2026-07-19): bootstrap sobre os anos-base + percentil da
-            # mistura — ver _bootstrap_channel_se() e contrato_motor_canal.md seção 4b.
-            # a_s/b_s aqui são só o ajuste central de registro, não geram mais `qs` sozinhos.
-            qs, a_s, b_s = _bootstrap_channel_se(cases_train, exp_train, e_mon, rng=rng)
+            if denominadores is not None:
+                # Canal de PROPORÇÃO (decisão 2026-08-28): o agravo é medido como
+                # fração do total de atendimentos da semana, não como contagem.
+                n_train = [denominadores.get((y, v), 0)
+                           for v in vizinhas for y in train_years]
+                n_mon = denominadores.get((mon_year, s), 0)
+                qs, a_s, b_s = _betabinom_channel_se(cases_train, n_train, n_mon)
+            else:
+                # Motor único (decisão 2026-07-19): bootstrap sobre os anos-base + percentil da
+                # mistura — ver _bootstrap_channel_se() e contrato_motor_canal.md seção 4b.
+                # a_s/b_s aqui são só o ajuste central de registro, não geram mais `qs` sozinhos.
+                qs, a_s, b_s = _bootstrap_channel_se(cases_train, exp_train, e_mon, rng=rng)
             channel_se.append(qs)
             params_se.append({'shape': round(a_s, 4), 'rate': round(b_s, 4)})
 
@@ -504,6 +579,7 @@ def compute_endemic_channel(
 
     return {
         'agravo': agravo_name,
+        'familia':         'proporcao' if denominadores is not None else 'contagem',
         'years': [int(y) for y in years],
         'se_list': [int(s) for s in all_se],
         'populations': {str(k): int(v) for k, v in populations.items()},
@@ -518,7 +594,7 @@ def compute_endemic_channel(
 
 # ── Helpers para pipeline incremental ────────────────────────────────
 
-def _save_channel_state(all_channels, path, base_hist_years, mon_year):
+def _save_channel_state(all_channels, path, base_hist_years, mon_year, denominador=None):
     """Salva params congelados (shape/rate/thresholds + raw histórico) para runs incrementais.
 
     Chamado apenas no run completo (janeiro / primeiro run).
@@ -528,6 +604,11 @@ def _save_channel_state(all_channels, path, base_hist_years, mon_year):
         'generated': pd.Timestamp.now().isoformat(),
         'base_hist_years': base_hist_years,
         'monitor_year': mon_year,
+        # Denominador dos canais de proporção (linhas de CID por SE). Precisa ser
+        # persistido: no run incremental o CSV só traz o ano monitorado, e sem o
+        # histórico os limiares beta-binomiais não podem ser refeitos.
+        'denominador_linhas': {f'{a}-{w}': int(v)
+                               for (a, w), v in (denominador or {}).items()},
         'channels': {}
     }
     for name, ch in all_channels.items():
@@ -536,6 +617,7 @@ def _save_channel_state(all_channels, path, base_hist_years, mon_year):
                     for r in ch['raw']]
         state['channels'][name] = {
             'agravo':   ch['agravo'],
+            'familia':  ch.get('familia', 'contagem'),
             'se_list':  ch['se_list'],
             'channels': ch['channels'],   # thresholds P10-P90 por SE — CONGELADOS
             'params':   ch['params'],     # shape/rate por SE — CONGELADOS
@@ -547,7 +629,7 @@ def _save_channel_state(all_channels, path, base_hist_years, mon_year):
     print(f"   → channel_state.json salvo ({size_kb:.0f} KB, {len(state['channels'])} canais)")
 
 
-def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year):
+def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year, denominadores=None):
     """Reconstrói canal a partir de params congelados + observações novas do ano monitorado.
 
     Sem MLE nem Monte Carlo — usa thresholds já calculados.
@@ -599,15 +681,34 @@ def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year):
     exceedance_all = {}
     kpis_all = {}
 
+    # Canal de proporção: os limiares NÃO são constantes — dependem do total de
+    # atendimentos da semana. Recalcula-se a preditiva beta-binomial com (a,b)
+    # congelados e o denominador observado naquela SE.
+    _familia = state_ch.get('familia', 'contagem')
+    _par = state_ch.get('params', {}).get(str(mon_year)) or \
+           (list(state_ch.get('params', {}).values())[0] if state_ch.get('params') else [])
+
     for y in years:
         obs_y = obs_by_year.get(y, {})
         clf_y, exc_y = [], []
+        frozen_y = frozen
+        if _familia == 'proporcao' and denominadores is not None and _par:
+            frozen_y = []
+            for i, s in enumerate(se_list):
+                pr = _par[i] if i < len(_par) else {}
+                a_, b_ = pr.get('shape'), pr.get('rate')
+                n_ = denominadores.get((y, s), 0)
+                if not a_ or not b_ or not n_:
+                    frozen_y.append(frozen[i])
+                else:
+                    frozen_y.append([float(_scipy_betabinom.ppf(q, int(n_), a_, b_))
+                                     for q in QUANTILES])
         for i, s in enumerate(se_list):
             obs = obs_y.get(s, 0)
-            t   = frozen[i]
+            t   = frozen_y[i]
             clf_y.append(classify_zone(obs, t))
             exc_y.append(round(obs / max(t[4], 1), 3))
-        channels_all[str(y)]     = frozen
+        channels_all[str(y)]     = frozen_y
         classifications_all[str(y)] = clf_y
         exceedance_all[str(y)]   = exc_y
         cases_y = [obs_y.get(s, 0) for s in se_list]
@@ -616,7 +717,8 @@ def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year):
             'total':        sum(cases_y),
             'pico':         max_c,
             'pico_se':      se_list[cases_y.index(max_c)] if max_c > 0 else 0,
-            'se_acima_p90': sum(1 for i, s in enumerate(se_list) if obs_y.get(s, 0) > frozen[i][4])
+            'se_acima_p90': sum(1 for i, s in enumerate(se_list)
+                                if obs_y.get(s, 0) > frozen_y[i][4])
         }
 
     return {
@@ -634,6 +736,43 @@ def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year):
 
 
 # ── Agregação de dados brutos ────────────────────────────────────────
+
+# ── Contagem de casos por SE ──────────────────────────────────────────────────
+# O CSV canônico passou a ser de nível-atendimento (uma linha por atendimento×CID,
+# com `atend_id`). Todo agravo é uma UNIÃO de CIDs — capítulo, SINAN, síndrome,
+# "Todos os atendimentos" — e somar linhas conta o mesmo atendimento uma vez por
+# código que ele carrega. Na APS essa razão subiu de 1,10 para 1,65 códigos por
+# atendimento entre 2023 e 2026, deriva de registro que o canal lia como epidemia.
+# CSVs antigos (sem a coluna) continuam funcionando pela soma de quantidade.
+
+def contar_casos(gdf, col_qty='quantidade', dedup=False):
+    """Casos por (ano, se).
+
+    dedup=True  → ATENDIMENTOS distintos. É a medida de DEMANDA e só faz sentido
+                  para o agregado: um paciente com três CID é um atendimento.
+    dedup=False → LINHAS de CID. É o numerador dos canais de agravo, porque o
+                  denominador deles também é linha (ver o canal de proporção):
+                  com numerador e denominador na mesma unidade, a deriva de
+                  codificação se cancela. Medido na APS de 2026: o capítulo
+                  respiratório vai de 13 para 5 semanas de alarme, o capítulo I
+                  de 9 para 2 — enquanto a fração de ATENDIMENTOS piorava (16 e
+                  10), porque a partir de jul/2025 cada atendimento passou a
+                  carregar mais códigos e a chance de tocar qualquer capítulo
+                  subiu junto (osteomuscular: 4,6% dos atendimentos em 2023,
+                  8,5% em 2026 — mas 4,3% e 5,9% das linhas).
+    """
+    if dedup and ATEND_COL in gdf.columns:
+        agg = gdf.groupby(['ano_epi', 'semana_epi'])[ATEND_COL].nunique().reset_index()
+    else:
+        agg = gdf.groupby(['ano_epi', 'semana_epi'])[col_qty].sum().reset_index()
+    agg.columns = ['ano', 'se', 'casos']
+    return agg[agg['se'] <= MAX_SE]
+
+
+def volume_por(df, col_chave, col_qty='quantidade'):
+    """Volume por chave (ranking de top-N), em linhas — mesma unidade dos canais de agravo."""
+    return df.groupby(col_chave)[col_qty].sum()
+
 
 def aggregate_raw_data(df, col_date, col_cid, col_qty='quantidade',
                        group_by='chapter', sinan_only=False):
@@ -680,9 +819,7 @@ def aggregate_raw_data(df, col_date, col_cid, col_qty='quantidade',
     for grupo, gdf in df.groupby('_grupo'):
         if pd.isna(grupo) or grupo is None or str(grupo).strip() == '':
             continue
-        agg = gdf.groupby(['ano_epi', 'semana_epi'])[col_qty].sum().reset_index()
-        agg.columns = ['ano', 'se', 'casos']
-        agg = agg[agg['se'] <= MAX_SE]
+        agg = contar_casos(gdf, col_qty, dedup=(group_by == 'all'))
         result[str(grupo)] = agg
 
     return result
@@ -6252,7 +6389,7 @@ def run_pipeline(input_file, populations, output_file,
             # não desaparecem em anos de baixo volume. A agregação dos dados continua
             # usando df_proc (ano monitorado apenas). Fix: bug A90 2026 = 0. [ekokubun]
             _df_for_topn = df if _incremental else df_proc
-            top_cids = (_df_for_topn.groupby('cid_codigo')[col_qty].sum()
+            top_cids = (volume_por(_df_for_topn, 'cid_codigo', col_qty)
                         .sort_values(ascending=False)
                         .head(n))
 
@@ -6271,9 +6408,7 @@ def run_pipeline(input_file, populations, output_file,
                 if desc == cid_code and cid_code in _code_to_desc:
                     desc = _code_to_desc[cid_code]
                 name = f"{cid_code} - {desc}" if cid_code != desc else cid_code
-                agg = df_cid.groupby(['ano_epi', 'semana_epi'])[col_qty].sum().reset_index()
-                agg.columns = ['ano', 'se', 'casos']
-                agg = agg[agg['se'] <= MAX_SE]
+                agg = contar_casos(df_cid, col_qty)
                 results[name] = agg
 
         # ── Síndromes e sentinelas de saúde coletiva ──────────────────
@@ -6285,9 +6420,7 @@ def run_pipeline(input_file, populations, output_file,
                 )
                 df_syn = df_proc[mask]
                 if len(df_syn) > 0:
-                    agg_syn = df_syn.groupby(['ano_epi', 'semana_epi'])[col_qty].sum().reset_index()
-                    agg_syn.columns = ['ano', 'se', 'casos']
-                    agg_syn = agg_syn[agg_syn['se'] <= MAX_SE]
+                    agg_syn = contar_casos(df_syn, col_qty)
                     if len(agg_syn) > 0 and agg_syn['casos'].sum() > 0:
                         results[syn_name] = agg_syn
             syn_ct = sum(1 for k in results if k in SYNDROME_DEFS)
@@ -6304,9 +6437,7 @@ def run_pipeline(input_file, populations, output_file,
                 df_ch = df_proc[df_proc['_chapter_from_desc'].notna()].copy()
                 if len(df_ch) > 0:
                     for ch, gdf in df_ch.groupby('_chapter_from_desc'):
-                        agg_c = gdf.groupby(['ano_epi', 'semana_epi'])[col_qty].sum().reset_index()
-                        agg_c.columns = ['ano', 'se', 'casos']
-                        agg_c = agg_c[agg_c['se'] <= MAX_SE]
+                        agg_c = contar_casos(gdf, col_qty)
                         if len(agg_c) > 0:
                             results[str(ch)] = agg_c
                     print(f"   → {len([k for k in results if k not in ['Todos os atendimentos']])} capítulos gerados")
@@ -6321,9 +6452,7 @@ def run_pipeline(input_file, populations, output_file,
                 df_sinan = df_proc[df_proc['_sinan_from_desc'] != 'Outros']
                 if len(df_sinan) > 0:
                     for sinan_name, gdf in df_sinan.groupby('_sinan_from_desc'):
-                        agg_s = gdf.groupby(['ano_epi', 'semana_epi'])[col_qty].sum().reset_index()
-                        agg_s.columns = ['ano', 'se', 'casos']
-                        agg_s = agg_s[agg_s['se'] <= MAX_SE]
+                        agg_s = contar_casos(gdf, col_qty)
                         if len(agg_s) > 0:
                             results[f"SINAN: {sinan_name}"] = agg_s
                     sinan_count = len([k for k in results if k.startswith('SINAN:')])
@@ -6335,7 +6464,7 @@ def run_pipeline(input_file, populations, output_file,
         df_proc = df_proc[df_proc['_desc_clean'] != '']
         df_proc = df_proc[df_proc['_desc_clean'] != 'nan']
 
-        top_descs = (df_proc.groupby('_desc_clean')[col_qty].sum()
+        top_descs = (volume_por(df_proc, '_desc_clean', col_qty)
                      .sort_values(ascending=False)
                      .head(n))
 
@@ -6347,9 +6476,7 @@ def run_pipeline(input_file, populations, output_file,
             cid_code = desc_to_cid_code(str(desc_name))
             display_name = f"{cid_code} - {desc_name}" if cid_code else str(desc_name)
             df_desc = df_proc[df_proc['_desc_clean'] == desc_name].copy()
-            agg = df_desc.groupby(['ano_epi', 'semana_epi'])[col_qty].sum().reset_index()
-            agg.columns = ['ano', 'se', 'casos']
-            agg = agg[agg['se'] <= MAX_SE]
+            agg = contar_casos(df_desc, col_qty)
             if len(agg) > 0:
                 results[display_name] = agg
                 print(f"     {display_name}: {int(agg['casos'].sum())} atendimentos")
@@ -6357,14 +6484,54 @@ def run_pipeline(input_file, populations, output_file,
     print(f"   {len(results)} agravos/grupos identificados")
 
     # Verificar SE incompleta
+    # ── Denominador dos canais de proporção ───────────────────────────
+    # Todo agravo (menos o próprio total) passa a ser medido como FRAÇÃO dos
+    # atendimentos da semana. Em modo incremental o total dos anos-base vem do
+    # channel_state.json, porque df_proc só tem o ano monitorado.
+    # O denominador é o total de LINHAS de CID da semana, não de atendimentos:
+    # é o que põe numerador e denominador na mesma unidade e cancela a deriva.
+    _denom = {}
+    _lin = (df_proc.groupby(['ano_epi', 'semana_epi']).size()
+            if len(df_proc) else pd.Series(dtype=int))
+    for (_a, _s_), _v in _lin.items():
+        if 1 <= int(_s_) <= MAX_SE:
+            _denom[(int(_a), int(_s_))] = int(_v)
+    if _incremental and _channel_state_path.exists():
+        try:
+            with open(_channel_state_path, encoding='utf-8') as _f:
+                _st = json.load(_f)
+            for _key, _v in (_st.get('denominador_linhas') or {}).items():
+                _a_, _w_ = _key.split('-')
+                _denom.setdefault((int(_a_), int(_w_)), int(_v))
+        except Exception as _e:
+            print(f"   ⚠ denominador histórico indisponível no state: {_e}")
+    print(f"   denominador de proporção: {len(_denom)} pares (ano, SE)")
+
     print(f"[3/5] Verificando completude da última SE...")
-    for name, agg_df in results.items():
-        info_se = detectar_se_incompleta(agg_df, 'se', 'ano', 'casos')
-        if info_se['decisao'] == 'EXCLUIR':
-            print(f"   ⚠ {name}: SE {info_se['ultima_se']}/{info_se['ano']} EXCLUÍDA "
-                  f"(ratio={info_se['ratio']})")
-            mask = (agg_df['ano'] == info_se['ano']) & (agg_df['se'] == info_se['ultima_se'])
-            agg_df.loc[mask, 'casos'] = 0
+    # A completude da última semana é propriedade da EXTRAÇÃO, não do agravo: ou a
+    # fonte tem o sábado daquela SE, ou a semana está truncada para todos. O
+    # critério é a data máxima do arquivo — a SE só está fechada se o dado alcança
+    # o sábado (SE-SUS vai de domingo a sábado).
+    #
+    # Antes: detectar_se_incompleta() era chamada SEM col_data, e nesse caminho ela
+    # soma 2 aos critérios "por não ter data" — com o terceiro critério (ratio>=0,5)
+    # bastando para fechar em 3, ela NUNCA excluía nada. Era código morto. E quando
+    # excluía, zerava os casos, o que é pior do que publicar: zero cai abaixo do p25
+    # e a semana truncada sai classificada como 'sucesso'. Agora a semana incompleta
+    # simplesmente não é publicada (ver se_max_observada).
+    _dt_max = pd.to_datetime(df_proc[col_date], dayfirst=True, errors='coerce').max()
+    _se_max_pub = 0
+    if pd.notna(_dt_max):
+        _ae_max, _se_dtmax = epi_week(_dt_max)
+        _fechada = _dt_max.isoweekday() == 6            # 6 = sábado
+        _se_max_pub = _se_dtmax if _fechada else _se_dtmax - 1
+        if _ae_max != _mon_year:
+            _se_max_pub = 0
+        print(f"   última data: {_dt_max.date()} (SE {_se_dtmax}/{_ae_max}, "
+              f"{'fechada' if _fechada else 'em curso'}) → publica até a SE {_se_max_pub}")
+
+    info_se = {'ultima_se': _se_max_pub, 'ano': _mon_year, 'ano_atual': _mon_year,
+               'completa': True, 'decisao': 'INCLUIR'}
 
     print(f"[4/5] Computando canais endêmicos (Gamma-Poisson)...")
 
@@ -6407,7 +6574,8 @@ def run_pipeline(input_file, populations, output_file,
                                          'casos': pd.Series(dtype=int)})
                 output_name = state_name
 
-            ch = _rebuild_from_state(state_ch, agg_2026, populations, _mon_year)
+            ch = _rebuild_from_state(state_ch, agg_2026, populations, _mon_year,
+                                     denominadores=_denom)
             if ch is not None:
                 all_channels[output_name] = ch
 
@@ -6422,7 +6590,9 @@ def run_pipeline(input_file, populations, output_file,
                     ch = compute_endemic_channel(
                         agg_df, populations, agravo_name=rname,
                         leave_one_out=False, base_hist_years=BASE_HIST_YEARS,
-                        use_mle=True, monitor_year=_mon_year)
+                        use_mle=True, monitor_year=_mon_year,
+                        denominadores=(None if rname == 'Todos os atendimentos'
+                                       or not _denom or not USAR_PROPORCAO else _denom))
                     all_channels[rname] = ch
 
         print(f"   {len(all_channels)} canais atualizados (sem MLE/MC — params congelados)")
@@ -6442,7 +6612,9 @@ def run_pipeline(input_file, populations, output_file,
                 leave_one_out=False,
                 base_hist_years=BASE_HIST_YEARS,
                 use_mle=True,
-                monitor_year=monitor_year
+                monitor_year=monitor_year,
+                denominadores=(None if name == 'Todos os atendimentos' or not _denom
+                               or not USAR_PROPORCAO else _denom),
             )
             all_channels[name] = ch
 
@@ -6450,7 +6622,8 @@ def run_pipeline(input_file, populations, output_file,
                 print(f"   {i+1}/{len(results)} agravos processados...")
 
         # Salvar params congelados para runs incrementais futuros
-        _save_channel_state(all_channels, _channel_state_path, BASE_HIST_YEARS, _mon_year)
+        _save_channel_state(all_channels, _channel_state_path, BASE_HIST_YEARS, _mon_year,
+                            denominador=_denom)
 
     print(f"[5/5] Exportando JSON para {output_file}...")
 
@@ -6468,6 +6641,12 @@ def run_pipeline(input_file, populations, output_file,
             'base_hist_years': base_hist_years,
             'se_atual': info_se.get('ultima_se', 0),
             'ano_atual': info_se.get('ano_atual', monitor_year),
+            # Última SE do ano monitorado que TEM dado. Sem isto a carga grava as
+            # semanas que ainda não aconteceram com casos=0, e zero cai abaixo do
+            # p25: setembro a dezembro do ano corrente entravam no banco como
+            # 'sucesso' (1.713 linhas da UPA e 1.675 da APS em 2026).
+            'se_max_observada': int(_se_max_pub),
+            'ano_monitorado': int(_mon_year),
         },
         'channels': all_channels,
     }

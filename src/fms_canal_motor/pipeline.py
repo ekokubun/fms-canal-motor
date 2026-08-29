@@ -626,7 +626,10 @@ def step4_boletim(channel_data):
         ("SINAN: Dengue",                   "ALTA"),
         ("SINAN: Diarréia/gastroenterite",  "ALTA"),
         ("SINAN: Pneumonia NE",             "ALTA"),
-        ("Todos os atendimentos",           "MODERADA"),
+        # "Todos os atendimentos" saiu da lista epidêmica em 2026-08-28: é indicador
+        # de DEMANDA, não de epidemia. Continua sendo calculado e publicado como
+        # série (com faixa de referência), mas não recebe leitura de zona no
+        # boletim — era ele que aparecia em emergência semana após semana.
         ("I - Doenças infecciosas e parasitárias", "ALTA"),
         ("X - Aparelho respiratório",       "MODERADA"),
         ("XVIII - Sintomas e sinais",       "MODERADA"),
