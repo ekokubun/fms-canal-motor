@@ -776,6 +776,45 @@ def volume_por(df, col_chave, col_qty='quantidade'):
     return df.groupby(col_chave)[col_qty].sum()
 
 
+def se_publicavel(datas, mon_year):
+    """Última SE do ano monitorado que pode ser publicada, e uma linha de diagnóstico.
+
+    Uma semana está fechada quando a fonte já entregou TODOS os dias em que ela
+    opera — e quais dias são esses vem da própria série, não do calendário. A APS
+    abre de segunda a sexta e a UPA nos sete dias; a regra anterior exigia o
+    sábado do calendário e por isso deixava o canal da APS uma semana atrasado
+    para sempre (em 31/08/2026 a SE 34 estava completa, seg-sex, e não saía).
+
+    Semana com feriado no último dia útil fica aberta por mais um ou dois dias,
+    até o dado da semana seguinte chegar — erra para o lado de não publicar
+    semana truncada, que é o lado seguro: zero cai abaixo do p25 e sairia como
+    'sucesso'.
+    """
+    datas = pd.Series(pd.to_datetime(datas)).dropna()
+    if datas.empty:
+        return 0, "sem datas no arquivo → nada a publicar"
+
+    dt_max = datas.max()
+    ano_max, se_max = epi_week(dt_max)
+
+    semanas = datas.dt.to_period('W')
+    n_semanas = max(semanas.nunique(), 1)
+    opera = {dia for dia, g in datas.groupby(datas.dt.dayofweek)
+             if g.dt.to_period('W').nunique() / n_semanas >= 0.5}
+
+    dias_ultima = set(datas[datas.map(lambda t: epi_week(t) == (ano_max, se_max))]
+                      .dt.dayofweek)
+    fechada = bool(opera) and opera.issubset(dias_ultima)
+
+    se_pub = se_max if fechada else se_max - 1
+    if ano_max != mon_year:
+        se_pub = 0
+    diag = (f"última data: {dt_max.date()} (SE {se_max}/{ano_max}, "
+            f"{'fechada' if fechada else 'em curso'}; a fonte opera "
+            f"{len(opera)} dias/semana) → publica até a SE {se_pub}")
+    return se_pub, diag
+
+
 def aggregate_raw_data(df, col_date, col_cid, col_qty='quantidade',
                        group_by='chapter', sinan_only=False):
     """
@@ -6521,16 +6560,9 @@ def run_pipeline(input_file, populations, output_file,
     # excluía, zerava os casos, o que é pior do que publicar: zero cai abaixo do p25
     # e a semana truncada sai classificada como 'sucesso'. Agora a semana incompleta
     # simplesmente não é publicada (ver se_max_observada).
-    _dt_max = pd.to_datetime(df_proc[col_date], dayfirst=True, errors='coerce').max()
-    _se_max_pub = 0
-    if pd.notna(_dt_max):
-        _ae_max, _se_dtmax = epi_week(_dt_max)
-        _fechada = _dt_max.isoweekday() == 6            # 6 = sábado
-        _se_max_pub = _se_dtmax if _fechada else _se_dtmax - 1
-        if _ae_max != _mon_year:
-            _se_max_pub = 0
-        print(f"   última data: {_dt_max.date()} (SE {_se_dtmax}/{_ae_max}, "
-              f"{'fechada' if _fechada else 'em curso'}) → publica até a SE {_se_max_pub}")
+    _datas = pd.to_datetime(df_proc[col_date], dayfirst=True, errors='coerce').dropna()
+    _se_max_pub, _diag = se_publicavel(_datas, _mon_year)
+    print(f"   {_diag}")
 
     info_se = {'ultima_se': _se_max_pub, 'ano': _mon_year, 'ano_atual': _mon_year,
                'completa': True, 'decisao': 'INCLUIR'}

@@ -117,3 +117,49 @@ def test_janela_configurada():
     identificável: o p90 da APS ficava 9% acima do p50. A janela de ±2 leva a
     15 observações e a faixa para ~23%."""
     assert cc.JANELA_SE >= 1
+
+
+# ── se_publicavel ────────────────────────────────────────────────────────────
+# A regra de completude olha os dias em que a FONTE opera, não o sábado do
+# calendário. Exigir sábado deixava o canal da APS uma semana atrasado para
+# sempre, porque a Atenção Básica não abre sábado.
+
+def _uteis(ini, fim):
+    return [d for d in pd.date_range(ini, fim) if d.dayofweek < 5]
+
+
+def test_aps_semana_fechada_na_sexta():
+    """SE 34 de 2026 (24-28/08, seg-sex) está completa e tem de sair."""
+    se, diag = cc.se_publicavel(_uteis("2026-07-20", "2026-08-28"), 2026)
+    assert se == 34, diag
+
+
+def test_aps_semana_em_curso_nao_sai():
+    se, _ = cc.se_publicavel(_uteis("2026-07-20", "2026-08-26"), 2026)
+    assert se == 33
+
+
+def test_upa_fecha_no_sabado():
+    se, _ = cc.se_publicavel(pd.date_range("2026-07-19", "2026-08-29"), 2026)
+    assert se == 34
+
+
+def test_upa_sexta_ainda_em_curso():
+    """A UPA atende 7 dias: sexta não fecha a semana dela."""
+    se, _ = cc.se_publicavel(pd.date_range("2026-07-19", "2026-08-28"), 2026)
+    assert se == 33
+
+
+def test_upa_domingo_da_semana_seguinte():
+    se, _ = cc.se_publicavel(pd.date_range("2026-07-19", "2026-08-30"), 2026)
+    assert se == 34
+
+
+def test_sem_datas():
+    se, diag = cc.se_publicavel([], 2026)
+    assert se == 0 and "nada a publicar" in diag
+
+
+def test_ano_diferente_do_monitorado_nao_publica():
+    se, _ = cc.se_publicavel(pd.date_range("2025-07-19", "2025-08-29"), 2026)
+    assert se == 0
