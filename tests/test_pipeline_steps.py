@@ -154,3 +154,25 @@ def test_zona_label_mapeamento(zona, esperado):
 
 def test_zona_label_desconhecida_cai_no_fallback():
     assert _zona_label("zona_que_nao_existe") == ("?", "AAAAAA")
+
+
+# ── aviso de limiar (v0.3.4) ─────────────────────────────────────────────────
+
+def _channel_data_osteo():
+    cd = _channel_data_dengue()
+    cd["channels"]["XIII - Sistema osteomuscular"] = cd["channels"].pop("SINAN: Dengue")
+    return cd
+
+
+def test_step4_boletim_aviso_de_limiar_nos_agravos_marcados():
+    boletim = step4_boletim(_channel_data_osteo())
+    item = next(i for i in boletim if i["name"] == "XIII - Sistema osteomuscular")
+    assert item["aviso"]
+    assert item["acao"] == item["aviso"]
+    assert "não surto" in item["acao"]
+
+
+def test_step4_boletim_sem_aviso_nos_demais():
+    boletim = step4_boletim(_channel_data_dengue())
+    assert all(i.get("aviso") is None for i in boletim)
+    assert boletim[0]["acao"] == "Manter vigilância ativa."

@@ -616,6 +616,24 @@ def _save_age_state(results, path):
 # Step 4: Gerar boletim enriquecido
 # ══════════════════════════════════════════════════════════════════════
 
+# Aviso provisório (2026-09-10) para agravos cujo alarme vem do LIMIAR, não de surto:
+# a base (média fixa 2023-25) não acompanha a alta de longo prazo nem desconta a
+# dengue de 2024-25 do denominador; na APS soma-se a mudança de codificação de
+# jul/2025. Ver catalogo.pergunta 'p90-alarme-tendencia'. Sai quando o limiar com
+# tendência (v0.4.0) entrar -- o aviso só esconde o sintoma, não corrige o limiar.
+_AVISO_BASE = ("Alarme do limiar, não surto: a base 2023-25 não acompanha a alta de "
+               "longo prazo e tem a dengue de 2024-25 no denominador (na APS, também "
+               "mudança de codificação). Limiar em revisão; ver catálogo "
+               "p90-alarme-tendencia.")
+AVISOS_LIMIAR = {
+    "XIII - Sistema osteomuscular": _AVISO_BASE,
+    "XII - Pele e tecido subcutâneo": _AVISO_BASE + " Há componente real menor: "
+                                      "infecção de pele purulenta em alta.",
+    "V - Transtornos mentais": _AVISO_BASE + " Há componente real menor: mais "
+                               "procura de jovens.",
+}
+
+
 def step4_boletim(channel_data):
     print("\n" + "=" * 60)
     print("STEP 4: Gerando boletim enriquecido")
@@ -704,6 +722,9 @@ def step4_boletim(channel_data):
             tend = f"Estável de {var_pct}% em 2025 vs média 2022-2024."
 
         acao = "Manter vigilância ativa." if prio in ("ALTA", "MODERADA") else "Monitoramento de rotina."
+        aviso = AVISOS_LIMIAR.get(name)
+        if aviso:
+            acao = aviso
 
         ultima_zona = cls_2026[last_se - 1] if last_se > 0 and last_se <= len(cls_2026) else 'sem dados'
         obs_ult     = raw[last_se - 1].get('c2026', 0) if last_se > 0 else 0
@@ -717,6 +738,7 @@ def step4_boletim(channel_data):
             'tendencia':         tend,
             'sazonalidade':      f"Pico na SE {pico_se}.",
             'acao':              acao,
+            'aviso':             aviso,
             'total_2025':        total_2025,
             'se_p90_2025':       se_p90,
             'total_2026':        total_2026,
