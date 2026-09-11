@@ -687,8 +687,27 @@ def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year, denominador
     # atendimentos da semana. Recalcula-se a preditiva beta-binomial com (a,b)
     # congelados e o denominador observado naquela SE.
     _familia = state_ch.get('familia', 'contagem')
-    _par = state_ch.get('params', {}).get(str(mon_year)) or \
-           (list(state_ch.get('params', {}).values())[0] if state_ch.get('params') else [])
+    # (a, b) por SE. Com base fixa eles são iguais em todos os anos, mas o ano
+    # monitorado sai com shape = rate = 0 nas SE que ainda não tinham acontecido no
+    # último recompute completo (n_mon = 0). Até a v0.3.2 esses zeros eram usados
+    # para recalcular TODOS os anos: o limiar caía no congelado do ano monitorado,
+    # que é zero nessas SE, e todo caso virava 'emergencia' -- nos anos históricos a
+    # partir da SE seguinte à última com dado, e no ano corrente assim que essa SE
+    # fosse publicada. Visto em 2026-09-10: p75 = 0 em ~100% dos agravos da UPA a
+    # partir da SE 37 e da APS a partir da SE 36. Cada SE pega agora o primeiro
+    # (a, b) válido, começando pelo ano monitorado.
+    _params_all = state_ch.get('params', {}) or {}
+    _ordem = [str(mon_year)] + [k for k in _params_all if k != str(mon_year)]
+
+    def _par_valido(i):
+        for k in _ordem:
+            lst = _params_all.get(k) or []
+            pr = (lst[i] or {}) if i < len(lst) else {}
+            if pr.get('shape') and pr.get('rate'):
+                return pr
+        return {}
+
+    _par = [_par_valido(i) for i in range(len(se_list))] if _params_all else []
 
     for y in years:
         obs_y = obs_by_year.get(y, {})
