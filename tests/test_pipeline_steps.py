@@ -176,3 +176,11 @@ def test_step4_boletim_sem_aviso_nos_demais():
     boletim = step4_boletim(_channel_data_dengue())
     assert all(i.get("aviso") is None for i in boletim)
     assert boletim[0]["acao"] == "Manter vigilância ativa."
+
+
+def test_step4_boletim_sem_aviso_quando_o_agravo_marcado_esta_verde():
+    cd = _channel_data_osteo()
+    cd["channels"]["XIII - Sistema osteomuscular"]["classifications"]["2026"] = ["sucesso", "seguranca"]
+    item = next(i for i in step4_boletim(cd) if i["name"] == "XIII - Sistema osteomuscular")
+    assert item["aviso"] is None
+    assert item["acao"] == "Manter vigilância ativa."

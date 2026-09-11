@@ -722,7 +722,12 @@ def step4_boletim(channel_data):
             tend = f"Estável de {var_pct}% em 2025 vs média 2022-2024."
 
         acao = "Manter vigilância ativa." if prio in ("ALTA", "MODERADA") else "Monitoramento de rotina."
-        aviso = AVISOS_LIMIAR.get(name)
+        # v0.3.5: o aviso só vale quando o agravo está de fato em alarme nas 2 últimas
+        # SE com dado (mesma regra do status do PDF e dos painéis). Em zona verde,
+        # "alarme do limiar" na coluna Recomendação confunde.
+        ult2 = cls_2026[max(0, last_se - 2):last_se] if last_se else []
+        aviso = (AVISOS_LIMIAR.get(name)
+                 if any(z in ("epidemico", "emergencia") for z in ult2) else None)
         if aviso:
             acao = aviso
 
