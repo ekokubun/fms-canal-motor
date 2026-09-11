@@ -184,3 +184,44 @@ def test_step4_boletim_sem_aviso_quando_o_agravo_marcado_esta_verde():
     item = next(i for i in step4_boletim(cd) if i["name"] == "XIII - Sistema osteomuscular")
     assert item["aviso"] is None
     assert item["acao"] == "Manter vigilância ativa."
+
+
+# ── rótulo da tendência (v0.3.6) ─────────────────────────────────────────────
+
+def _sem_2022(cd):
+    ch = cd["channels"]["SINAN: Dengue"]
+    ch["years"] = [2023, 2024, 2025, 2026]
+    for r in ch["raw"]:
+        del r["c2022"]
+    return cd
+
+
+def test_step4_boletim_tendencia_rotula_os_anos_que_entraram_na_media():
+    # Base real dos canais (UPA, APS e SINAN): sem 2022. A média é de 2023-2024;
+    # até a v0.3.5 o texto dizia "média 2022-2024" fixo.
+    b = step4_boletim(_sem_2022(_channel_data_dengue()))[0]
+    assert b["media_hist"] == 16          # int(média de [15, 18])
+    assert b["tendencia"] == "Aumento de 118.8% em 2025 vs média 2023-2024."
+
+
+def test_step4_boletim_tendencia_com_2022_no_dado_segue_2022_2024():
+    b = step4_boletim(_channel_data_dengue())[0]
+    assert b["tendencia"] == "Aumento de 133.3% em 2025 vs média 2022-2024."
+
+
+def test_step4_boletim_tendencia_sem_ano_anterior():
+    cd = _sem_2022(_channel_data_dengue())
+    cd["channels"]["SINAN: Dengue"]["years"] = [2025, 2026]
+    b = step4_boletim(cd)[0]
+    assert b["tendencia"] == "Sem ano anterior a 2025 no dado para comparar."
+
+
+@pytest.mark.parametrize("anos,esperado", [
+    ([2023, 2024], "2023-2024"),
+    ([2024, 2023], "2023-2024"),
+    ([2023], "2023"),
+    ([2022, 2024], "2022, 2024"),
+])
+def test_rotulo_anos(anos, esperado):
+    from fms_canal_motor.pipeline import _rotulo_anos
+    assert _rotulo_anos(anos) == esperado

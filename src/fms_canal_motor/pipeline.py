@@ -634,6 +634,15 @@ AVISOS_LIMIAR = {
 }
 
 
+def _rotulo_anos(anos):
+    """Rótulo dos anos que entraram na média: '2023-2024' se contíguos, '2023' se
+    um só, '2020, 2023' se houver buraco (o SINAN tem 2010-2020 e 2023-2026)."""
+    anos = sorted(anos)
+    if len(anos) > 1 and anos[-1] - anos[0] == len(anos) - 1:
+        return f"{anos[0]}-{anos[-1]}"
+    return ", ".join(str(a) for a in anos)
+
+
 def step4_boletim(channel_data):
     print("\n" + "=" * 60)
     print("STEP 4: Gerando boletim enriquecido")
@@ -687,7 +696,10 @@ def step4_boletim(channel_data):
 
         total_2025 = sum(r.get('c2025', 0) for r in raw)
         total_2026 = sum(r.get('c2026', 0) for r in raw)
-        hist_years  = [y for y in years if 2022 <= y <= 2024]
+        # Até 3 anos antes de 2025, mas só os que EXISTEM no dado: com a base atual
+        # (2023-25; 2021/2022 fora por implantação) sobram 2023 e 2024. O rótulo da
+        # tendência sai desta lista -- até a v0.3.5 dizia "2022-2024" fixo.
+        hist_years  = sorted(y for y in years if 2022 <= y <= 2024)
         hist_totals = [sum(r.get(f'c{y}', 0) for r in raw) for y in hist_years]
         media_hist  = int(np.mean(hist_totals)) if hist_totals else 0
         var_pct     = round((total_2025 - media_hist) / max(media_hist, 1) * 100, 1)
@@ -714,12 +726,15 @@ def step4_boletim(channel_data):
             if z in zone_counts_2026:
                 zone_counts_2026[z] += 1
 
-        if var_pct > 10:
-            tend = f"Aumento de {var_pct}% em 2025 vs média 2022-2024."
+        base_lbl = _rotulo_anos(hist_years)
+        if not hist_years:
+            tend = "Sem ano anterior a 2025 no dado para comparar."
+        elif var_pct > 10:
+            tend = f"Aumento de {var_pct}% em 2025 vs média {base_lbl}."
         elif var_pct < -10:
-            tend = f"Redução de {abs(var_pct)}% em 2025 vs média 2022-2024."
+            tend = f"Redução de {abs(var_pct)}% em 2025 vs média {base_lbl}."
         else:
-            tend = f"Estável de {var_pct}% em 2025 vs média 2022-2024."
+            tend = f"Estável de {var_pct}% em 2025 vs média {base_lbl}."
 
         acao = "Manter vigilância ativa." if prio in ("ALTA", "MODERADA") else "Monitoramento de rotina."
         # v0.3.5: o aviso só vale quando o agravo está de fato em alarme nas 2 últimas
