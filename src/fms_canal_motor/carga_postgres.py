@@ -146,10 +146,27 @@ def rows_from_channel_data(channel_data, obs, canal, clf, metas):
                 clf.append((nome, 'Todas', ano, se, z, e))
 
 
-def rows_from_age_inmem(age_results, obs, canal, clf, metas):
+def _corte_futuro(meta):
+    """(ano, se) -> True quando a semana do ano monitorado ainda não fechou
+    (se > metadata.se_max_observada). Sem o campo (JSON antigo), nunca corta."""
+    meta = meta or {}
+    ano_mon, se_max = meta.get('ano_monitorado'), meta.get('se_max_observada')
+
+    def _futura(ano, se):
+        return (ano_mon is not None and se_max is not None
+                and int(ano) == int(ano_mon) and int(se) > int(se_max))
+    return _futura
+
+
+def rows_from_age_inmem(age_results, obs, canal, clf, metas, meta=None):
     """Faixas etárias — formato em memória do pipeline.step3_age_channels.
     results[agravo][faixa] = {channels:{se:{p10..}}, raw:{ano:{se:n}}, classifications:{ano:{se:zona}}}
     """
+    # v0.3.7: o corte das semanas que ainda não fecharam valia só para o agregado.
+    # Pelas faixas etárias entravam a semana em curso (valor parcial) e zona para as
+    # 52 SE do ano -- em 11/09/2026, 1.870 linhas da UPA e 1.666 da APS nas SE 36-52,
+    # quase todas 'sucesso'. Semana futura não tem observado nem zona.
+    _futura = _corte_futuro(meta)
     # O mesmo filtro do agregado vale aqui: sem ele o agravo "Todos os atendimentos"
     # voltava pela porta das faixas etárias, com 6 faixas x 52 SE = 312 linhas de zona.
     from fms_canal_motor.compute_channels import sem_zona_epidemica
@@ -164,6 +181,8 @@ def rows_from_age_inmem(age_results, obs, canal, clf, metas):
             for ano_s, ses in raw.items():
                 ano = int(ano_s)
                 for se_s, cnt in ses.items():
+                    if _futura(ano, se_s):
+                        continue
                     obs.append((agravo, faixa, ano, int(se_s), int(cnt)))
 
             # 1 conjunto de limiares → replicado para cada ano observado
@@ -177,13 +196,16 @@ def rows_from_age_inmem(age_results, obs, canal, clf, metas):
                 for ano_s, ses in clfs.items():
                     ano = int(ano_s)
                     for se_s, z in ses.items():
+                        if _futura(ano, se_s):
+                            continue
                         clf.append((agravo, faixa, ano, int(se_s), z, None))
 
 
-def rows_from_age_compact(age_compact, obs, canal, metas):
+def rows_from_age_compact(age_compact, obs, canal, metas, meta=None):
     """Faixas etárias — formato compacto do age_channels.json (sem classificação).
     {agravo:{faixa:{years, se_list, channels:{ano:[[5q]×52]}, raw:[{cANO}×52]}}}
     """
+    _futura = _corte_futuro(meta)
     for agravo, faixas in age_compact.items():
         metas.setdefault(agravo, classify_agravo(agravo))
         for faixa, d in faixas.items():
@@ -192,6 +214,8 @@ def rows_from_age_compact(age_compact, obs, canal, metas):
                 se = int(se_list[i]) if i < len(se_list) else i + 1
                 for k, v in entry.items():
                     if k.startswith('c') and k[1:].isdigit():
+                        if _futura(int(k[1:]), se):
+                            continue
                         obs.append((agravo, faixa, int(k[1:]), se, int(v)))
             for ano_s, arr in d.get('channels', {}).items():
                 ano = int(ano_s)
@@ -467,10 +491,11 @@ def main():
     metas, obs, canal, clf = {}, [], [], []
     rows_from_channel_data(channel_data, obs, canal, clf, metas)
     if age:
+        _meta_ch = channel_data.get('metadata')
         if age_compact:
-            rows_from_age_compact(age, obs, canal, metas)
+            rows_from_age_compact(age, obs, canal, metas, meta=_meta_ch)
         else:
-            rows_from_age_inmem(age, obs, canal, clf, metas)
+            rows_from_age_inmem(age, obs, canal, clf, metas, meta=_meta_ch)
 
     meta = dict(channel_data.get('metadata', {}))
     meta['modo'] = modo_str

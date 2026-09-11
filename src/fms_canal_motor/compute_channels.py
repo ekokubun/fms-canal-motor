@@ -744,6 +744,7 @@ def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year, denominador
 
     return {
         'agravo':          state_ch['agravo'],
+        'familia':         _familia,
         'years':           years,
         'se_list':         se_list,
         'populations':     {str(k): int(v) for k, v in populations.items()},
@@ -754,6 +755,93 @@ def _rebuild_from_state(state_ch, new_obs_df, populations, mon_year, denominador
         'exceedance':      exceedance_all,
         'kpis':            kpis_all,
     }
+
+
+def _primeiro_par_valido(params_all, mon_year, i):
+    """(a, b) da SE de índice i: o do ano monitorado se for válido, senão o do primeiro
+    ano que tiver. Mesma regra do _rebuild_from_state (v0.3.3)."""
+    params_all = params_all or {}
+    ordem = [str(mon_year)] + [k for k in params_all if k != str(mon_year)]
+    for k in ordem:
+        lst = params_all.get(k) or []
+        pr = (lst[i] or {}) if i < len(lst) else {}
+        if pr.get('shape') and pr.get('rate'):
+            return pr
+    return {}
+
+
+def _projeta_denominador(denominadores, mon_year, se_max, base_years, se_list):
+    """Total de linhas de CID esperado em cada SE do ano monitorado que ainda não fechou.
+
+    n(s) = mediana dos anos-base na SE s × (total do ano monitorado ÷ total da mediana
+    dos anos-base, nas SE 1..se_max). Serve só para desenhar a faixa das semanas
+    vindouras: nenhuma zona depende dele, e a faixa de cada SE volta a usar o
+    denominador observado quando a semana fecha.
+    """
+    def _mediana(s):
+        vals = [denominadores.get((int(y), s), 0) for y in base_years]
+        vals = [v for v in vals if v > 0]
+        return float(np.median(vals)) if vals else 0.0
+
+    fechadas = [s for s in se_list if s <= se_max and denominadores.get((mon_year, s), 0) > 0]
+    obs_ = sum(denominadores[(mon_year, s)] for s in fechadas)
+    ref_ = sum(_mediana(s) for s in fechadas)
+    razao = obs_ / ref_ if obs_ > 0 and ref_ > 0 else 1.0
+    return {s: int(round(_mediana(s) * razao)) for s in se_list if s > se_max}
+
+
+def _sem_avaliacao_futura(ch, mon_year, se_max, denominadores=None, base_years=()):
+    """Semana do ano monitorado que ainda não fechou (SE > se_max) não tem observado
+    nem zona (v0.3.7).
+
+    Até a v0.3.6 o JSON trazia essas semanas com casos = 0 (e a semana em curso com o
+    valor parcial), classificadas: zero cai abaixo do p25 e o painel mostrava setembro a
+    dezembro como 'sucesso', com a linha do observado despencando a zero. Agora:
+      - raw: a chave c<ano> SAI (ausência, não zero; quem faz .get(k, 0) segue igual);
+      - classifications e exceedance: None;
+      - kpis do ano: só SE 1..se_max;
+      - channels: a faixa continua até a SE 52. Na família contagem ela já existia; na
+        de proporção dependia do denominador da semana e saía zero -- passa a usar o
+        denominador projetado (_projeta_denominador).
+    Nenhum parâmetro nem limiar de semana fechada muda.
+    """
+    mon = str(mon_year)
+    se_list = [int(s) for s in ch.get('se_list', [])]
+    futuras = [i for i, s in enumerate(se_list) if s > se_max]
+    if not futuras:
+        return ch
+    raw = ch.get('raw', [])
+    for i in futuras:
+        if i < len(raw):
+            raw[i].pop(f'c{mon_year}', None)
+    for chave in ('classifications', 'exceedance'):
+        lst = (ch.get(chave) or {}).get(mon)
+        if lst is not None:
+            for i in futuras:
+                if i < len(lst):
+                    lst[i] = None
+
+    faixa = (ch.get('channels') or {}).get(mon)
+    if faixa is not None and ch.get('familia') == 'proporcao' and denominadores:
+        n_proj = _projeta_denominador(denominadores, mon_year, se_max, base_years, se_list)
+        for i in futuras:
+            pr = _primeiro_par_valido(ch.get('params'), mon_year, i)
+            n_ = n_proj.get(se_list[i], 0)
+            if pr and n_ > 0 and i < len(faixa):
+                faixa[i] = [float(_scipy_betabinom.ppf(q, n_, pr['shape'], pr['rate']))
+                            for q in QUANTILES]
+
+    if 'kpis' in ch and faixa is not None:
+        fechadas = [(i, s) for i, s in enumerate(se_list) if s <= se_max and i < len(raw)]
+        casos = [raw[i].get(f'c{mon_year}') or 0 for i, _ in fechadas]
+        pico = max(casos) if casos else 0
+        ch['kpis'][mon] = {
+            'total':        int(sum(casos)),
+            'pico':         int(pico),
+            'pico_se':      fechadas[casos.index(pico)][1] if pico > 0 else 0,
+            'se_acima_p90': sum(1 for (i, _), c in zip(fechadas, casos) if c > faixa[i][4]),
+        }
+    return ch
 
 
 # ── Agregação de dados brutos ────────────────────────────────────────
@@ -6678,6 +6766,13 @@ def run_pipeline(input_file, populations, output_file,
         _save_channel_state(all_channels, _channel_state_path, BASE_HIST_YEARS, _mon_year,
                             denominador=_denom)
 
+    # v0.3.7: as SE do ano monitorado que ainda não fecharam ficam sem observado e sem
+    # zona; a faixa vai até a SE 52 (projetada na família proporção).
+    _base_proj = ((_state.get('base_hist_years') if _incremental else None)
+                  or base_hist_years or BASE_HIST_YEARS)
+    for _ch in all_channels.values():
+        _sem_avaliacao_futura(_ch, _mon_year, int(_se_max_pub), _denom or None, _base_proj)
+
     print(f"[5/5] Exportando JSON para {output_file}...")
 
     output = {
@@ -6700,6 +6795,10 @@ def run_pipeline(input_file, populations, output_file,
             # 'sucesso' (1.713 linhas da UPA e 1.675 da APS em 2026).
             'se_max_observada': int(_se_max_pub),
             'ano_monitorado': int(_mon_year),
+            # v0.3.7: SE > se_max_observada do ano monitorado não têm observado (a chave
+            # c<ano> sai do raw) nem zona (None); a faixa segue até a SE 52.
+            'semanas_futuras': 'sem observado e sem zona; faixa até a SE 52 '
+                               '(proporção: denominador projetado)',
         },
         'channels': all_channels,
     }

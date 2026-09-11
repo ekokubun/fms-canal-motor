@@ -740,17 +740,22 @@ def step4_boletim(channel_data):
         # v0.3.5: o aviso só vale quando o agravo está de fato em alarme nas 2 últimas
         # SE com dado (mesma regra do status do PDF e dos painéis). Em zona verde,
         # "alarme do limiar" na coluna Recomendação confunde.
-        ult2 = cls_2026[max(0, last_se - 2):last_se] if last_se else []
+        # v0.3.7: posição de last_se no se_list. Canal raro do SINAN tem se_list esparso
+        # (a Sífilis NE da UPA tem 30 SE) e a posição na lista não é SE - 1: até a v0.3.6
+        # a zona, o observado e o limiar da "última SE" vinham de outra semana -- em
+        # geral de uma semana futura, classificada 'sucesso' com zero.
+        i_ult = se_list.index(last_se) + 1 if last_se in se_list else 0
+        ult2 = cls_2026[max(0, i_ult - 2):i_ult] if i_ult else []
         aviso = (AVISOS_LIMIAR.get(name)
                  if any(z in ("epidemico", "emergencia") for z in ult2) else None)
         if aviso:
             acao = aviso
 
-        ultima_zona = cls_2026[last_se - 1] if last_se > 0 and last_se <= len(cls_2026) else 'sem dados'
-        obs_ult     = raw[last_se - 1].get('c2026', 0) if last_se > 0 else 0
+        ultima_zona = cls_2026[i_ult - 1] if 0 < i_ult <= len(cls_2026) else 'sem dados'
+        obs_ult     = raw[i_ult - 1].get('c2026', 0) if i_ult > 0 else 0
         ch_2026     = ch.get('channels', {}).get('2026', [])
-        p90_ult     = ch_2026[last_se - 1][4] if ch_2026 and last_se > 0 else 1
-        p50_ult     = ch_2026[last_se - 1][2] if ch_2026 and last_se > 0 else 1
+        p90_ult     = ch_2026[i_ult - 1][4] if ch_2026 and i_ult > 0 else 1
+        p50_ult     = ch_2026[i_ult - 1][2] if ch_2026 and i_ult > 0 else 1
 
         boletim.append({
             'name':              name,
