@@ -892,10 +892,20 @@ def se_publicavel(datas, mon_year):
     sábado do calendário e por isso deixava o canal da APS uma semana atrasado
     para sempre (em 31/08/2026 a SE 34 estava completa, seg-sex, e não saía).
 
-    Semana com feriado no último dia útil fica aberta por mais um ou dois dias,
-    até o dado da semana seguinte chegar — erra para o lado de não publicar
-    semana truncada, que é o lado seguro: zero cai abaixo do p25 e sairia como
-    'sucesso'.
+    Dia de operação que ficou PARA TRÁS sem dado não segura a semana: se a sexta
+    já chegou, a segunda de feriado não chega mais. Até a v0.3.7 segurava, e a APS
+    publicava a semana anterior até o dado da segunda seguinte — em 2026 foram 4
+    SEs (Carnaval, Tiradentes, 24/06 e 07/09); na SE 36 o boletim, que seguia o
+    calendário, saiu com a tabela da SE 35.
+
+    Feriado no ÚLTIMO dia útil (sexta) continua segurando a semana por mais um ou
+    dois dias: pelas datas não há como distinguir sexta de feriado de sexta ainda
+    não extraída, e o erro vai para o lado de não publicar semana truncada, que é
+    o seguro — zero cai abaixo do p25 e sairia como 'sucesso'.
+
+    O portão diz que a semana ACABOU, não que está COMPLETA: dia perdido por
+    falha de extração tem a mesma cara de feriado, e — antes e depois desta
+    regra — a semana sai assim que chega o dado da seguinte.
     """
     datas = pd.Series(pd.to_datetime(datas)).dropna()
     if datas.empty:
@@ -911,14 +921,26 @@ def se_publicavel(datas, mon_year):
 
     dias_ultima = set(datas[datas.map(lambda t: epi_week(t) == (ano_max, se_max))]
                       .dt.dayofweek)
-    fechada = bool(opera) and opera.issubset(dias_ultima)
+
+    # Posição na semana EPIDEMIOLÓGICA, que começa no domingo (pandas: seg=0..dom=6).
+    # Sem isso o domingo da UPA — primeiro dia da SE — pareceria vir depois da sexta.
+    def pos(dia):
+        return (dia + 1) % 7
+
+    faltando = opera - dias_ultima
+    pendentes = {dia for dia in faltando if pos(dia) > pos(dt_max.dayofweek)}
+    fechada = bool(opera) and not pendentes
 
     se_pub = se_max if fechada else se_max - 1
     if ano_max != mon_year:
         se_pub = 0
+    nomes = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+    atras = sorted(faltando - pendentes, key=pos)
+    sem_dado = (f"; sem dado em {', '.join(nomes[d] for d in atras)}, que "
+                f"{'ficou' if len(atras) == 1 else 'ficaram'} para trás" if atras else "")
     diag = (f"última data: {dt_max.date()} (SE {se_max}/{ano_max}, "
             f"{'fechada' if fechada else 'em curso'}; a fonte opera "
-            f"{len(opera)} dias/semana) → publica até a SE {se_pub}")
+            f"{len(opera)} dias/semana{sem_dado}) → publica até a SE {se_pub}")
     return se_pub, diag
 
 

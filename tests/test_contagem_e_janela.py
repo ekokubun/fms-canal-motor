@@ -163,3 +163,53 @@ def test_sem_datas():
 def test_ano_diferente_do_monitorado_nao_publica():
     se, _ = cc.se_publicavel(pd.date_range("2025-07-19", "2025-08-29"), 2026)
     assert se == 0
+
+
+# ── feriado (v0.3.8) ─────────────────────────────────────────────────────────
+# Dia útil que ficou para trás sem dado não chega mais e não segura a semana.
+
+def _sem(datas, *tirar):
+    fora = set(pd.to_datetime(list(tirar)))
+    return [d for d in datas if d not in fora]
+
+
+def test_aps_segunda_feriado_fecha_na_sexta():
+    """SE 36 de 2026: segunda 07/09 feriado, ter-sex entregues. Na v0.3.7 saía 35
+    e o boletim, pelo calendário, rotulou a tabela da 35 como SE 36."""
+    se, diag = cc.se_publicavel(_sem(_uteis("2026-07-20", "2026-09-11"), "2026-09-07"), 2026)
+    assert se == 36, diag
+    assert "seg, que ficou para trás" in diag
+
+
+def test_aps_segunda_feriado_semana_ainda_em_curso():
+    """Quarta chegou, quinta e sexta ainda podem chegar: não fecha."""
+    se, _ = cc.se_publicavel(_sem(_uteis("2026-07-20", "2026-09-09"), "2026-09-07"), 2026)
+    assert se == 35
+
+
+def test_carnaval_seg_e_ter():
+    """SE 7 de 2026: 16 e 17/02 sem atendimento na APS."""
+    se, _ = cc.se_publicavel(_sem(_uteis("2026-01-05", "2026-02-20"),
+                                  "2026-02-16", "2026-02-17"), 2026)
+    assert se == 7
+
+
+def test_sexta_feriado_continua_segurando():
+    """Sexta de feriado é indistinguível de sexta não extraída: segura (lado
+    seguro) até o dado da semana seguinte."""
+    se, _ = cc.se_publicavel(_uteis("2026-07-20", "2026-09-10"), 2026)
+    assert se == 35
+    se, _ = cc.se_publicavel(_uteis("2026-07-20", "2026-09-10") + [pd.Timestamp("2026-09-14")], 2026)
+    assert se == 36
+
+
+def test_upa_domingo_ausente_nao_vira_pendente():
+    """Semana epidemiológica começa no domingo. Sem a posição epidemiológica o
+    domingo (dayofweek 6) pareceria vir depois do sábado (5) e seguraria a SE."""
+    se, _ = cc.se_publicavel(_sem(pd.date_range("2026-07-19", "2026-09-12"), "2026-09-06"), 2026)
+    assert se == 36
+
+
+def test_upa_sabado_ainda_pode_chegar():
+    se, _ = cc.se_publicavel(_sem(pd.date_range("2026-07-19", "2026-09-11"), "2026-09-07"), 2026)
+    assert se == 35
